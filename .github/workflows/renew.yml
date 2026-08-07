@@ -1,0 +1,91 @@
+name: Auto Renew HidenCloud 
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 05 * * 4' # 根据到期时间在星期几 提前一天,比如星期三到期，cron写星期二即可
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  Renew-HidenCloud:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: ⚙ 设置 Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: 🛠️ 安装系统依赖和 Python 依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          pip install playwright requests 'requests[socks]'
+          python -m playwright install --with-deps chrome
+          
+      - name: ⚙ 设置代理 (sing-box)
+        env:
+          NODE_LINK: ${{ secrets.NODE_LINK }}
+        run: |
+          bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
+          
+      - name: 🚀 运行续期脚本
+        env:
+          EMAIL: ${{ secrets.EMAIL }}
+          PASSWORD: ${{ secrets.PASSWORD }}
+          COOKIE_VALUE: ${{ secrets.COOKIE_VALUE }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          IS_PROXY: ${{ env.IS_PROXY }}
+          PROXY_SERVER: ${{ env.PROXY_SERVER }}
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 app.py
+
+      - name: 🧽 清理进程和临时文件
+        if: always()
+        run: |
+          pkill -f sing-box || true
+          pkill -f chromedriver || true
+          pkill -f chrome || true
+          pkill -f Xvfb || true
+          rm -f sing-box sing-box-config.json sing-box.log
+
+      # ========== 防止 60 天无活动禁用 workflow ==========
+      - name: 📅 更新 time.txt 保持仓库活跃
+        if: always()
+        run: |
+          echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" > time.txt
+          echo "# 此文件由 GitHub Actions 自动更新，用于防止仓库 60 天无活动导致 scheduled workflow 被禁用" >> time.txt
+          echo "# Auto-updated by GitHub Actions to prevent scheduled workflows from being disabled after 60 days of inactivity" >> time.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add time.txt
+          # 只有内容变化时才 commit（避免空 commit）
+          if git diff --staged --quiet; then
+            echo "time.txt 无变化，跳过 commit"
+          else
+            git commit -m "chore: update time.txt to keep workflow alive [skip ci]"
+            git push
+            echo "✅ time.txt 已更新并推送"
+          fi
+
+      - name: 🧹 清理旧的工作流运行记录
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
+          count=0
+          for run_id in $runs; do
+            count=$((count + 1))
+            if [ $count -gt 1 ]; then
+              echo "删除运行记录: $run_id"
+              gh run delete $run_id || true
+            fi
+          done
